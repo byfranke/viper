@@ -2,7 +2,7 @@
 """
 VIPER - Threat Intelligence Tool
 Fast domain discovery for attack surface mapping and threat hunting
-Version: 1.0
+Version: 1.1
 Author: byFranke
 """
 
@@ -23,90 +23,43 @@ import os
 import hashlib
 import shutil
 import tempfile
-from modules import Colors, Config, render_html_template
+from modules import Colors, Config
+
+# Version
+VERSION = "1.1"
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load configuration
 config = Config.load_config()
-    def _save_txt(self, domains):
-        """Save results to a text file"""
-        self._validate_output_file()
-        try:
-            with open(str(self.output_file), 'w', encoding='utf-8') as f:
-                for domain in domains:
-                    f.write(f"{domain}\n")
-        except Exception as e:
-            print(f"{Colors.RED}[-] Error saving TXT file: {e}{Colors.RESET}", file=sys.stderr)
+def update_viper():
+    """Check and install updates from GitHub"""
+    print(f"{Colors.YELLOW}[*] Checking for updates...{Colors.RESET}")
     
-    def _save_csv(self, domains):
-        """Save results to a CSV file"""
-        self._validate_output_file()
-        try:
-            with open(str(self.output_file), 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Domain', 'Status Code', 'Technologies'])
-                for domain in domains:
-                    info = self.domain_info.get(domain, {})
-                    writer.writerow([
-                        domain,
-                        info.get('status_code', 'N/A'),
-                        ', '.join(info.get('technologies', []))
-                    ])
-        except Exception as e:
-            print(f"{Colors.RED}[-] Error saving CSV file: {e}{Colors.RESET}", file=sys.stderr)
-    
-    def _save_json(self, domains):
-        """Save results to a JSON file"""
-        self._validate_output_file()
-        output = {
-            'scan_info': {
-                'timestamp': datetime.now().isoformat(),
-                'total_domains': len(domains),
-                'filter_directory': self.filter_dir
-            },
-            'domains': []
-        }
-        for domain in domains:
-            domain_info = self.domain_info.get(domain, {})
-            output['domains'].append({
-                'domain': domain,
-                'status_code': domain_info.get('status_code', 'N/A'),
-                'technologies': domain_info.get('technologies', []),
-                'directory': domain_info.get('directory', self.filter_dir),
-                'url': domain_info.get('url', domain)
-            })
-        try:
-            with open(str(self.output_file), 'w', encoding='utf-8') as f:
-                json.dump(output, f, indent=2)
-        except Exception as e:
-            print(f"{Colors.RED}[-] Error saving JSON file: {e}{Colors.RESET}", file=sys.stderr)
-    
-    def _save_html(self, domains):
-        """Save results to an HTML file"""
-        self._validate_output_file()
-        output = []
-        for domain in domains:
-            domain_info = self.domain_info.get(domain, {})
-            output.append({
-                'domain': domain,
-                'status_code': domain_info.get('status_code', 'N/A'),
-                'technologies': domain_info.get('technologies', []),
-                'directory': domain_info.get('directory', self.filter_dir),
-                'url': domain_info.get('url', domain)
-            })
-        context = {
-            'domains': output,
-            'timestamp': datetime.now().isoformat(),
-            'total_domains': len(domains),
-            'version': VERSION
-        }
-        try:
-            with open(str(self.output_file), 'w', encoding='utf-8') as f:
-                f.write(render_html_template('report.html', **context))
-        except Exception as e:
-            print(f"{Colors.RED}[-] Error saving HTML file: {e}{Colors.RESET}", file=sys.stderr)
+    try:
+        # Get remote version
+        repo_url = config.get('github_repo') if config else "https://raw.githubusercontent.com/byfranke/viper/main/viper.py"
+        response = requests.get(repo_url, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"{Colors.RED}[-] Unable to check for updates{Colors.RESET}")
+            return False
+        
+        # Save to temp file
+        temp_file = tempfile.mktemp(suffix='.py')
+        with open(temp_file, 'wb') as f:
+            f.write(response.content)
+        
+        # Calculate hashes
+        current_script = os.path.abspath(__file__)
+        
+        def get_file_hash(filepath):
+            with open(filepath, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        
+        current_hash = get_file_hash(current_script)
+        new_hash = get_file_hash(temp_file)
         
         # Compare hashes
         if current_hash == new_hash:
@@ -370,26 +323,8 @@ class ViperFinder:
             # Remove www. if present
             domain = re.sub(r'^www\.', '', domain)
             
-            # Blacklist search engines and common non-target domains
-            blacklist = [
-                'duckduckgo.com',
-                'bing.com',
-                'google.com',
-                'yahoo.com',
-                'wikipedia.org',
-                'facebook.com',
-                'twitter.com',
-                'youtube.com',
-                'linkedin.com',
-                'instagram.com',
-                'reddit.com',
-                'w3.org',
-                'schema.org',
-                'creativecommons.org'
-            ]
-            
-            # Check if domain is in blacklist
-            for blocked in blacklist:
+            # Check if domain is in blacklist (from config.json)
+            for blocked in self.blacklisted_domains:
                 if blocked in domain.lower():
                     return None
             
@@ -563,15 +498,6 @@ class ViperFinder:
         except Exception as e:
             print(f"{Colors.RED}[-] Error saving file: {str(e)}{Colors.RESET}", file=sys.stderr)
             return False
-                
-                print(f"{Colors.GREEN}[+] {len(sorted_domains)} domains saved to: {self.output_file}{Colors.RESET}")
-            except Exception as e:
-                print(f"{Colors.RED}[-] Error saving file: {e}{Colors.RESET}", file=sys.stderr)
-                return False
-        else:
-            self._display_results(sorted_domains)
-        
-        return True
     
     def _save_json(self, domains):
         """Save results in JSON format"""
@@ -746,14 +672,14 @@ def main():
         """
     )
     
-    # Grupo de entrada de keywords
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument(
+    # Input keywords
+    parser.add_argument(
         'keywords',
         nargs='*',
-        help='Keywords for domain search (direct command line)'
+        default=[],
+        help='Keywords for domain search (e.g., "wordpress" "cms sites")'
     )
-    input_group.add_argument(
+    parser.add_argument(
         '--list', '-l',
         dest='keyword_file',
         help='File containing keyword list (one per line)'
@@ -876,8 +802,8 @@ def main():
                  ╚████╔╝ ██║██║     ███████╗██║  ██║                    
                   ╚═══╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝                    
 {Colors.RESET}                                                                
-{Colors.WHITE}               Threat Intelligence & Attack Surface Mapping{Colors.RESET}         
-{Colors.CYAN}                    Fast Domain Discovery for Hunting{Colors.RESET}               
+{Colors.WHITE}            Threat Intelligence & Attack Surface Mapping{Colors.RESET}         
+{Colors.CYAN}                 Fast Domain Discovery for Hunting{Colors.RESET}               
                                                                 
 {Colors.YELLOW}                         v{VERSION} - byFranke{Colors.RESET}                      
                                                                 
@@ -893,7 +819,11 @@ def main():
         output_file=args.output_file,
         verbose=args.verbose,
         filter_dir=args.filter_dir,
-        threads=args.threads
+        threads=args.threads,
+        detect_tech=args.detect_tech,
+        output_format=args.output_format,
+        delay_min=args.delay_min,
+        delay_max=args.delay_max
     )
     
     try:
