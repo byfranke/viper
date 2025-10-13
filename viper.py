@@ -23,79 +23,90 @@ import os
 import hashlib
 import shutil
 import tempfile
+from modules import Colors, Config, render_html_template
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Version
-VERSION = "1.0"
-GITHUB_REPO = "https://raw.githubusercontent.com/byfranke/viper/main/viper.py"
-
-
-# ANSI Color codes
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-
-
-def calculate_file_hash(filepath):
-    """Calculate SHA256 hash of a file"""
-    sha256_hash = hashlib.sha256()
-    try:
-        with open(filepath, "rb") as f:
-            for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
-    except Exception as e:
-        return None
-
-
-def update_viper():
-    """Update VIPER from GitHub repository"""
-    print(f"{Colors.CYAN}[*] Checking for updates...{Colors.RESET}")
+# Load configuration
+config = Config.load_config()
+    def _save_txt(self, domains):
+        """Save results to a text file"""
+        self._validate_output_file()
+        try:
+            with open(str(self.output_file), 'w', encoding='utf-8') as f:
+                for domain in domains:
+                    f.write(f"{domain}\n")
+        except Exception as e:
+            print(f"{Colors.RED}[-] Error saving TXT file: {e}{Colors.RESET}", file=sys.stderr)
     
-    try:
-        # Get current script path
-        current_script = os.path.abspath(__file__)
-        current_hash = calculate_file_hash(current_script)
-        
-        if not current_hash:
-            print(f"{Colors.RED}[-] Error: Could not read current script{Colors.RESET}")
-            return False
-        
-        print(f"{Colors.WHITE}[*] Current script: {current_script}{Colors.RESET}")
-        print(f"{Colors.WHITE}[*] Current hash: {current_hash[:16]}...{Colors.RESET}")
-        
-        # Download new version to temp
-        print(f"{Colors.CYAN}[*] Downloading from GitHub...{Colors.RESET}")
-        response = requests.get(GITHUB_REPO, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"{Colors.RED}[-] Error: Could not download update (Status: {response.status_code}){Colors.RESET}")
-            return False
-        
-        # Save to temp file
-        temp_dir = tempfile.gettempdir()
-        temp_file = os.path.join(temp_dir, 'viper_update.py')
-        
-        with open(temp_file, 'wb') as f:
-            f.write(response.content)
-        
-        # Calculate new hash
-        new_hash = calculate_file_hash(temp_file)
-        
-        if not new_hash:
-            print(f"{Colors.RED}[-] Error: Could not verify downloaded file{Colors.RESET}")
-            return False
-        
-        print(f"{Colors.WHITE}[*] New hash: {new_hash[:16]}...{Colors.RESET}")
+    def _save_csv(self, domains):
+        """Save results to a CSV file"""
+        self._validate_output_file()
+        try:
+            with open(str(self.output_file), 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Domain', 'Status Code', 'Technologies'])
+                for domain in domains:
+                    info = self.domain_info.get(domain, {})
+                    writer.writerow([
+                        domain,
+                        info.get('status_code', 'N/A'),
+                        ', '.join(info.get('technologies', []))
+                    ])
+        except Exception as e:
+            print(f"{Colors.RED}[-] Error saving CSV file: {e}{Colors.RESET}", file=sys.stderr)
+    
+    def _save_json(self, domains):
+        """Save results to a JSON file"""
+        self._validate_output_file()
+        output = {
+            'scan_info': {
+                'timestamp': datetime.now().isoformat(),
+                'total_domains': len(domains),
+                'filter_directory': self.filter_dir
+            },
+            'domains': []
+        }
+        for domain in domains:
+            domain_info = self.domain_info.get(domain, {})
+            output['domains'].append({
+                'domain': domain,
+                'status_code': domain_info.get('status_code', 'N/A'),
+                'technologies': domain_info.get('technologies', []),
+                'directory': domain_info.get('directory', self.filter_dir),
+                'url': domain_info.get('url', domain)
+            })
+        try:
+            with open(str(self.output_file), 'w', encoding='utf-8') as f:
+                json.dump(output, f, indent=2)
+        except Exception as e:
+            print(f"{Colors.RED}[-] Error saving JSON file: {e}{Colors.RESET}", file=sys.stderr)
+    
+    def _save_html(self, domains):
+        """Save results to an HTML file"""
+        self._validate_output_file()
+        output = []
+        for domain in domains:
+            domain_info = self.domain_info.get(domain, {})
+            output.append({
+                'domain': domain,
+                'status_code': domain_info.get('status_code', 'N/A'),
+                'technologies': domain_info.get('technologies', []),
+                'directory': domain_info.get('directory', self.filter_dir),
+                'url': domain_info.get('url', domain)
+            })
+        context = {
+            'domains': output,
+            'timestamp': datetime.now().isoformat(),
+            'total_domains': len(domains),
+            'version': VERSION
+        }
+        try:
+            with open(str(self.output_file), 'w', encoding='utf-8') as f:
+                f.write(render_html_template('report.html', **context))
+        except Exception as e:
+            print(f"{Colors.RED}[-] Error saving HTML file: {e}{Colors.RESET}", file=sys.stderr)
         
         # Compare hashes
         if current_hash == new_hash:
@@ -147,14 +158,20 @@ class ViperFinder:
         self.filtered_domains = set()
         self.domain_info = {}  # Store detailed info for each domain
         
-        # Rotate User-Agents to avoid detection
-        self.user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-        ]
+        # Use global configuration if available
+        if config:
+            self.user_agents = config.get("user_agents", [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ])
+            self.blacklisted_domains = config.get("blacklisted_domains", [])
+            self.search_engines = config.get("search_engines", {})
+        else:
+            # Default values if config is not available
+            self.user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ]
+            self.blacklisted_domains = []
+            self.search_engines = {}
         
         self.headers = self._get_headers()
         self.request_count = 0
@@ -383,6 +400,21 @@ class ViperFinder:
         except:
             return None
     
+    def _extract_links(self, soup, selector=None):
+        """Extract links from BeautifulSoup object"""
+        links = []
+        if selector:
+            elements = soup.select(selector)
+        else:
+            elements = soup.find_all('a', href=True)
+            
+        for element in elements:
+            if hasattr(element, 'get'):
+                href = element.get('href')
+                if href and isinstance(href, str):
+                    links.append(href)
+        return links
+    
     def search_duckduckgo(self, keyword):
         """Search domains using DuckDuckGo"""
         self.log(f"Searching on DuckDuckGo: {keyword}")
@@ -400,27 +432,20 @@ class ViperFinder:
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # DuckDuckGo result links
-                for link in soup.find_all('a', class_='result__a'):
+                # First try DuckDuckGo specific result links
+                links = self._extract_links(soup, 'a.result__a')
+                
+                # If not enough results, try all links
+                if len(links) < self.limit:
+                    links.extend(self._extract_links(soup))
+                
+                # Process links
+                for href in links:
                     if len(self.domains) >= self.limit:
                         break
-                    
-                    href = link.get('href', '')
-                    if href:
-                        domain = self.extract_domain(href)
-                        if domain:
-                            self.domains.add(domain)
-                            self.log(f"Found domain: {domain}")
-                
-                # Try alternative selectors
-                if len(self.domains) < self.limit:
-                    for link in soup.find_all('a', href=True):
-                        if len(self.domains) >= self.limit:
-                            break
                         
-                        href = link['href']
-                        # Only process external links
-                        if href.startswith('http') and 'duckduckgo.com' not in href:
+                    # Only process external links
+                    if href.startswith('http') and not any(blocked in href.lower() for blocked in self.blacklisted_domains):
                             domain = self.extract_domain(href)
                             if domain:
                                 self.domains.add(domain)
@@ -446,15 +471,20 @@ class ViperFinder:
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                for link in soup.find_all('a', href=True):
+                # Extract all links
+                links = self._extract_links(soup)
+                
+                # Process links
+                for href in links:
                     if len(self.domains) >= self.limit:
                         break
-                    
-                    href = link['href']
-                    if href.startswith('http') and 'bing.com' not in href:
+                        
+                    # Only process external links
+                    if href.startswith('http') and not any(blocked in href.lower() for blocked in self.blacklisted_domains):
                         domain = self.extract_domain(href)
                         if domain:
                             self.domains.add(domain)
+                            self.log(f"Found domain: {domain}")
                             
         except Exception as e:
             self.log(f"Error searching Bing: {e}")
@@ -476,22 +506,63 @@ class ViperFinder:
                 break
             self.search_keyword(keyword.strip())
     
+    def _save_file(self, mode='w', **kwargs):
+        """Generic file saving helper with validation"""
+        if not self.output_file:
+            raise ValueError("No output file specified")
+        if not isinstance(self.output_file, str):
+            raise ValueError("Output file path must be a string")
+        
+        # Ensure directory exists
+        output_dir = os.path.dirname(self.output_file)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Open file with provided mode and additional arguments
+        return open(str(self.output_file), mode, **kwargs)
+
+    def _validate_output_file(self):
+        """Validate output file path"""
+        if not self.output_file:
+            raise ValueError("No output file specified")
+        if not isinstance(self.output_file, str):
+            raise ValueError("Output file path must be a string")
+        
+        # Ensure directory exists
+        output_dir = os.path.dirname(self.output_file)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+    
     def save_results(self):
         """Save or display results in specified format"""
         # Use filtered domains if directory filter was applied
         domains_to_save = list(self.filtered_domains) if self.filter_dir else list(self.domains)
         sorted_domains = sorted(domains_to_save)[:self.limit]
         
-        if self.output_file:
-            try:
-                if self.output_format == 'json':
-                    self._save_json(sorted_domains)
-                elif self.output_format == 'csv':
-                    self._save_csv(sorted_domains)
-                elif self.output_format == 'html':
-                    self._save_html(sorted_domains)
-                else:  # txt
-                    self._save_txt(sorted_domains)
+        if not self.output_file:
+            # No output file specified, just display results
+            self._display_results(sorted_domains)
+            return True
+        
+        # Save to file based on format
+        try:
+            self._validate_output_file()
+            
+            if self.output_format == 'json':
+                self._save_json(sorted_domains)
+            elif self.output_format == 'csv':
+                self._save_csv(sorted_domains)
+            elif self.output_format == 'html':
+                self._save_html(sorted_domains)
+            else:  # txt
+                self._save_txt(sorted_domains)
+            
+            print(f"{Colors.GREEN}[+] {len(sorted_domains)} domains saved to: {self.output_file}{Colors.RESET}")
+            return True
+            
+        except Exception as e:
+            print(f"{Colors.RED}[-] Error saving file: {str(e)}{Colors.RESET}", file=sys.stderr)
+            return False
                 
                 print(f"{Colors.GREEN}[+] {len(sorted_domains)} domains saved to: {self.output_file}{Colors.RESET}")
             except Exception as e:
