@@ -1,5 +1,5 @@
 {
-    "version": "1.0",
+    "version": "1.2",
     "github_repo": "https://raw.githubusercontent.com/byfranke/viper/main/viper.py",
     "blacklisted_domains": [
         "duckduckgo.com",
@@ -15,7 +15,10 @@
         "reddit.com",
         "w3.org",
         "schema.org",
-        "creativecommons.org"
+        "creativecommons.org",
+        "startpage.com",
+        "startmail.com",
+        "mastodon.social"
     ],
     "user_agents": [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

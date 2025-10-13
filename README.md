@@ -1,4 +1,4 @@
-# VIPER 1.1
+# VIPER 1.2
 
 VIPER is a Python-based command-line tool for fast domain discovery, designed for attack surface mapping and threat intelligence gathering. It leverages search engines to find domains related to specific keywords and provides advanced filtering and analysis capabilities.
 
@@ -13,6 +13,21 @@ VIPER is a Python-based command-line tool for fast domain discovery, designed fo
   * **Anti-Detection Mechanisms**: Utilizes User-Agent rotation and randomized delays between requests to avoid blocks and simulate human behavior.
   * **Self-Update Capability**: Includes a function to check for and install the latest version of the tool directly from its GitHub repository.
   * **External Configuration**: Key settings like user agents, blacklisted domains, and search engine parameters can be modified via the `config/config.json` file without altering the source code.
+
+## Important Notes
+
+**Search Engine Limitations**: Modern search engines implement aggressive anti-bot protection. VIPER uses advanced Google Dorking techniques and multiple fallback sources (Bing, DuckDuckGo, Brave, Common Crawl) to maximize results. However, you may experience:
+
+* Limited results due to rate limiting
+* Temporary blocks after multiple searches
+* Better results when using moderate delays (--delay-min 3 --delay-max 8)
+* Improved success rates when using VPN/proxy or different networks
+
+**Best Practices**:
+* Use realistic delays between requests
+* Avoid running multiple instances simultaneously
+* Consider breaking large keyword lists into smaller batches
+* Wait 10-15 minutes between intensive scans from the same IP
 
 ## Installation
 

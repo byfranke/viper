@@ -2,7 +2,7 @@
 """
 VIPER - Threat Intelligence Tool
 Fast domain discovery for attack surface mapping and threat hunting
-Version: 1.1
+Version: 1.2
 Author: byFranke
 """
 
@@ -26,13 +26,22 @@ import tempfile
 from modules import Colors, Config
 
 # Version
-VERSION = "1.1"
+VERSION = "1.2"
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Load configuration
+# Load configuration from config/config.json
 config = Config.load_config()
+
+# Validate configuration
+if config:
+    config_version = config.get('version', 'unknown')
+    if config_version != VERSION:
+        print(f"{Colors.YELLOW}[!] Warning: Config version ({config_version}) differs from script version ({VERSION}){Colors.RESET}")
+else:
+    print(f"{Colors.RED}[!] Warning: Could not load config.json, using default values{Colors.RESET}")
+
 def update_viper():
     """Check and install updates from GitHub"""
     print(f"{Colors.YELLOW}[*] Checking for updates...{Colors.RESET}")
@@ -118,6 +127,7 @@ class ViperFinder:
             ])
             self.blacklisted_domains = config.get("blacklisted_domains", [])
             self.search_engines = config.get("search_engines", {})
+            self.config_loaded = True
         else:
             # Default values if config is not available
             self.user_agents = [
@@ -125,10 +135,27 @@ class ViperFinder:
             ]
             self.blacklisted_domains = []
             self.search_engines = {}
+            self.config_loaded = False
+        
+        # Log configuration status
+        if verbose:
+            if self.config_loaded:
+                print(f"{Colors.GREEN}[+] Configuration loaded from config/config.json{Colors.RESET}")
+                print(f"{Colors.CYAN}    - User agents: {len(self.user_agents)}{Colors.RESET}")
+                print(f"{Colors.CYAN}    - Blacklisted domains: {len(self.blacklisted_domains)}{Colors.RESET}")
+                print(f"{Colors.CYAN}    - Search engines configured: {len(self.search_engines)}{Colors.RESET}\n")
+            else:
+                print(f"{Colors.YELLOW}[!] Using default configuration (config.json not loaded){Colors.RESET}\n")
         
         self.headers = self._get_headers()
         self.request_count = 0
         self.max_requests_per_source = 3
+        
+        # Create a session for better connection handling
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+        
+
     
     def _get_headers(self):
         """Get randomized headers to avoid detection"""
@@ -350,16 +377,22 @@ class ViperFinder:
                     links.append(href)
         return links
     
-    def search_duckduckgo(self, keyword):
-        """Search domains using DuckDuckGo"""
-        self.log(f"Searching on DuckDuckGo: {keyword}")
+    def search_google(self, keyword, start=0):
+        """Search domains using Google (improved scraping)"""
+        self.log(f"Searching on Google: {keyword} (start={start})")
         
         try:
-            # Rotate headers for each request
-            self.headers = self._get_headers()
+            # Rotate headers for each request with additional fields
+            headers = self._get_headers()
+            headers.update({
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.google.com/',
+            })
             
-            url = f"https://html.duckduckgo.com/html/?q={quote_plus(keyword)}"
-            response = requests.get(url, headers=self.headers, timeout=15)
+            # Google search URL with start parameter for pagination
+            url = f"https://www.google.com/search?q={quote_plus(keyword)}&start={start}&num=50"
+            
+            response = self.session.get(url, headers=headers, timeout=15, allow_redirects=True)
             
             # Random delay after request
             self._random_delay()
@@ -367,38 +400,76 @@ class ViperFinder:
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # First try DuckDuckGo specific result links
-                links = self._extract_links(soup, 'a.result__a')
+                # Extract links from Google search results
+                links = []
                 
-                # If not enough results, try all links
-                if len(links) < self.limit:
-                    links.extend(self._extract_links(soup))
+                # Method 1: Look for result divs with links
+                for div in soup.find_all('div', class_='g'):
+                    for link in div.find_all('a', href=True):
+                        href = link.get('href', '')
+                        if href.startswith('http') or href.startswith('/url?q='):
+                            links.append(href)
+                
+                # Method 2: Look for cite tags (Google shows URLs)
+                for cite in soup.find_all('cite'):
+                    url_text = cite.get_text()
+                    if url_text and not url_text.startswith(('javascript:', 'about:')):
+                        # Clean and format URL
+                        url_text = url_text.split(' › ')[0].strip()
+                        if not url_text.startswith('http'):
+                            url_text = 'https://' + url_text
+                        links.append(url_text)
+                
+                # Method 3: Look for any href starting with /url?q= (Google redirect)
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href', '')
+                    if '/url?q=' in href:
+                        # Extract actual URL from Google redirect
+                        match = re.search(r'/url\?q=([^&]+)', href)
+                        if match:
+                            actual_url = match.group(1)
+                            links.append(actual_url)
+                
+                self.log(f"Found {len(links)} potential links from Google")
                 
                 # Process links
                 for href in links:
                     if len(self.domains) >= self.limit:
                         break
                         
+                    # Decode URL if it's encoded
+                    try:
+                        from urllib.parse import unquote
+                        href = unquote(href)
+                    except:
+                        pass
+                    
                     # Only process external links
-                    if href.startswith('http') and not any(blocked in href.lower() for blocked in self.blacklisted_domains):
-                            domain = self.extract_domain(href)
-                            if domain:
-                                self.domains.add(domain)
-                                self.log(f"Found domain: {domain}")
+                    if (href.startswith('http') and 
+                        'google.com' not in href and
+                        not any(blocked in href.lower() for blocked in self.blacklisted_domains)):
+                        domain = self.extract_domain(href)
+                        if domain and domain not in self.domains:
+                            self.domains.add(domain)
+                            self.log(f"Found domain: {domain}")
+                
+            else:
+                self.log(f"Google returned status code: {response.status_code}")
                 
         except Exception as e:
-            self.log(f"Error searching DuckDuckGo: {e}")
+            self.log(f"Error searching Google: {e}")
     
-    def search_bing(self, keyword):
-        """Search domains using Bing"""
-        self.log(f"Searching on Bing: {keyword}")
+    def search_duckduckgo(self, keyword):
+        """Search domains using DuckDuckGo Lite (more scraping-friendly)"""
+        self.log(f"Searching on DuckDuckGo: {keyword}")
         
         try:
             # Rotate headers for each request
-            self.headers = self._get_headers()
+            headers = self._get_headers()
             
-            url = f"https://www.bing.com/search?q={quote_plus(keyword)}"
-            response = requests.get(url, headers=self.headers, timeout=15)
+            # Use DuckDuckGo Lite which is more bot-friendly
+            url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(keyword)}"
+            response = self.session.get(url, headers=headers, timeout=15)
             
             # Random delay after request
             self._random_delay()
@@ -406,8 +477,16 @@ class ViperFinder:
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # Extract all links
-                links = self._extract_links(soup)
+                # DuckDuckGo Lite uses simple table structure
+                # Extract all links from result rows
+                links = []
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href', '')
+                    # Skip internal DDG links and javascript
+                    if href and not href.startswith(('javascript:', '//', '/', 'http://lite.duckduckgo', 'https://lite.duckduckgo')):
+                        links.append(href)
+                
+                self.log(f"Found {len(links)} potential links from DuckDuckGo")
                 
                 # Process links
                 for href in links:
@@ -420,19 +499,341 @@ class ViperFinder:
                         if domain:
                             self.domains.add(domain)
                             self.log(f"Found domain: {domain}")
+                
+        except Exception as e:
+            self.log(f"Error searching DuckDuckGo: {e}")
+    
+    def search_google_dorking(self, keyword):
+        """Search using Google Dorking techniques for better results"""
+        self.log(f"Searching with Google Dorking: {keyword}")
+        
+        # Google Dorking queries to find more relevant results
+        dork_queries = [
+            f'intitle:"{keyword}"',
+            f'inurl:{keyword}',
+            f'{keyword} site:*.com',
+            f'{keyword} site:*.org',
+            f'{keyword} site:*.net',
+            f'{keyword} site:*.br',
+        ]
+        
+        for dork in dork_queries:
+            if len(self.domains) >= self.limit:
+                break
+            
+            try:
+                headers = self._get_headers()
+                headers.update({
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Referer': 'https://www.google.com/',
+                })
+                
+                url = f"https://www.google.com/search?q={quote_plus(dork)}&num=50"
+                response = self.session.get(url, headers=headers, timeout=15, allow_redirects=True)
+                
+                # Delay between dork queries
+                self._random_delay()
+                
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Extract URLs from multiple sources
+                    links = []
+                    
+                    # Method 1: cite tags
+                    for cite in soup.find_all('cite'):
+                        url_text = cite.get_text().strip()
+                        if url_text and not url_text.startswith(('http://www.google', 'https://www.google')):
+                            url_text = url_text.split(' › ')[0].strip()
+                            if not url_text.startswith('http'):
+                                url_text = 'https://' + url_text
+                            if url_text not in links:
+                                links.append(url_text)
+                    
+                    # Method 2: Look for /url?q= patterns
+                    for link in soup.find_all('a', href=True):
+                        href = link.get('href', '')
+                        if '/url?q=' in href:
+                            match = re.search(r'/url\?q=([^&]+)', href)
+                            if match:
+                                from urllib.parse import unquote
+                                actual_url = unquote(match.group(1))
+                                if actual_url not in links:
+                                    links.append(actual_url)
+                    
+                    self.log(f"Google Dorking found {len(links)} links with query: {dork}")
+                    
+                    for href in links:
+                        if len(self.domains) >= self.limit:
+                            break
+                        
+                        if (href.startswith('http') and 
+                            'google.com' not in href and
+                            not any(blocked in href.lower() for blocked in self.blacklisted_domains)):
+                            domain = self.extract_domain(href)
+                            if domain and domain not in self.domains:
+                                self.domains.add(domain)
+                                self.log(f"Found domain: {domain}")
+                
+            except Exception as e:
+                self.log(f"Error with Google Dork '{dork}': {e}")
+    
+    def search_bing(self, keyword):
+        """Search domains using Bing web scraping"""
+        self.log(f"Searching on Bing: {keyword}")
+        
+        try:
+            # Rotate headers for each request
+            headers = self._get_headers()
+            headers.update({
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.bing.com/',
+            })
+            
+            # Use count parameter to get more results
+            url = f"https://www.bing.com/search?q={quote_plus(keyword)}&count=50"
+            response = self.session.get(url, headers=headers, timeout=15, allow_redirects=True)
+            
+            # Random delay after request
+            self._random_delay()
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Try to extract Bing result URLs from different possible selectors
+                links = []
+                
+                # Method 1: Look for cite tags (Bing shows URLs in <cite>)
+                for cite in soup.find_all('cite'):
+                    url_text = cite.get_text().strip()
+                    if url_text and not url_text.startswith(('http://www.bing', 'https://www.bing')):
+                        # Clean and format URL - remove breadcrumb parts
+                        url_text = url_text.split(' › ')[0].strip()
+                        url_text = url_text.split(' · ')[0].strip()
+                        if not url_text.startswith('http'):
+                            url_text = 'https://' + url_text
+                        if url_text not in links:
+                            links.append(url_text)
+                
+                # Method 2: Look for result links in result items
+                # Bing uses <li class="b_algo"> for organic results
+                for li in soup.find_all('li', class_='b_algo'):
+                    for link in li.find_all('a', href=True):
+                        href = link.get('href', '')
+                        if href.startswith('http') and 'bing.com' not in href and href not in links:
+                            links.append(href)
+                
+                # Method 3: Look for any external links
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href', '')
+                    # Check if it's a real result URL (not Bing internal)
+                    if (href.startswith('http') and 
+                        'bing.com' not in href and 
+                        'microsoft.com' not in href and
+                        'msn.com' not in href and
+                        href not in links):
+                        links.append(href)
+                
+                self.log(f"Found {len(links)} potential links from Bing")
+                
+                # Process links
+                for href in links:
+                    if len(self.domains) >= self.limit:
+                        break
+                        
+                    # Only process external links
+                    if not any(blocked in href.lower() for blocked in self.blacklisted_domains):
+                        domain = self.extract_domain(href)
+                        if domain and domain not in self.domains:
+                            self.domains.add(domain)
+                            self.log(f"Found domain: {domain}")
+            else:
+                self.log(f"Bing returned status code: {response.status_code}")
                             
         except Exception as e:
             self.log(f"Error searching Bing: {e}")
     
+    def search_brave(self, keyword):
+        """Search domains using Brave Search"""
+        self.log(f"Searching on Brave: {keyword}")
+        
+        try:
+            # Rotate headers for each request
+            self.headers = self._get_headers()
+            
+            url = f"https://search.brave.com/search?q={quote_plus(keyword)}"
+            response = requests.get(url, headers=self.headers, timeout=15)
+            
+            # Random delay after request
+            self._random_delay()
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Extract links from Brave search results
+                links = []
+                
+                # Look for result links
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href', '')
+                    # Only external links
+                    if href.startswith('http') and 'brave.com' not in href:
+                        links.append(href)
+                
+                self.log(f"Found {len(links)} potential links from Brave")
+                
+                # Process links
+                for href in links:
+                    if len(self.domains) >= self.limit:
+                        break
+                        
+                    if not any(blocked in href.lower() for blocked in self.blacklisted_domains):
+                        domain = self.extract_domain(href)
+                        if domain:
+                            self.domains.add(domain)
+                            self.log(f"Found domain: {domain}")
+                            
+        except Exception as e:
+            self.log(f"Error searching Brave: {e}")
+    
+    def search_startpage(self, keyword):
+        """Search domains using Startpage (uses Google results, more privacy-friendly)"""
+        self.log(f"Searching on Startpage: {keyword}")
+        
+        try:
+            # Rotate headers for each request
+            self.headers = self._get_headers()
+            
+            url = f"https://www.startpage.com/sp/search?query={quote_plus(keyword)}"
+            response = requests.get(url, headers=self.headers, timeout=15)
+            
+            # Random delay after request
+            self._random_delay()
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Extract links from search results
+                links = []
+                
+                # Startpage uses specific classes for results
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href', '')
+                    # Filter external links
+                    if href.startswith('http') and 'startpage.com' not in href:
+                        links.append(href)
+                
+                self.log(f"Found {len(links)} potential links from Startpage")
+                
+                # Process links
+                for href in links:
+                    if len(self.domains) >= self.limit:
+                        break
+                        
+                    if not any(blocked in href.lower() for blocked in self.blacklisted_domains):
+                        domain = self.extract_domain(href)
+                        if domain:
+                            self.domains.add(domain)
+                            self.log(f"Found domain: {domain}")
+                            
+        except Exception as e:
+            self.log(f"Error searching Startpage: {e}")
+    
+    def search_commoncrawl(self, keyword):
+        """Search domains using Common Crawl Index"""
+        self.log(f"Searching on Common Crawl: {keyword}")
+        
+        try:
+            # Get the latest Common Crawl index
+            index_url = "https://index.commoncrawl.org/collinfo.json"
+            response = self.session.get(index_url, timeout=15)
+            
+            if response.status_code == 200:
+                indexes = response.json()
+                if indexes:
+                    # Use the most recent index
+                    latest_index = indexes[0]['cdx-api']
+                    
+                    # Try multiple search patterns
+                    search_patterns = [
+                        f"*.{keyword}.*",  # keyword in domain
+                        f"*{keyword}*",    # keyword anywhere in URL
+                    ]
+                    
+                    for pattern in search_patterns:
+                        if len(self.domains) >= self.limit:
+                            break
+                        
+                        # Search for URLs containing the keyword
+                        search_url = f"{latest_index}?url={pattern}&output=json&limit=1000&filter=statuscode:200"
+                        
+                        self.log(f"Querying Common Crawl with pattern: {pattern}")
+                        search_response = self.session.get(search_url, timeout=30)
+                        
+                        if search_response.status_code == 200 and search_response.text.strip():
+                            # Parse JSON lines
+                            lines = search_response.text.strip().split('\n')
+                            self.log(f"Common Crawl returned {len(lines)} results for pattern {pattern}")
+                            
+                            for line in lines:
+                                if len(self.domains) >= self.limit:
+                                    break
+                                
+                                try:
+                                    data = json.loads(line)
+                                    url = data.get('url', '')
+                                    if url:
+                                        domain = self.extract_domain(url)
+                                        if domain and domain not in self.domains:
+                                            if not any(blocked in domain.lower() for blocked in self.blacklisted_domains):
+                                                self.domains.add(domain)
+                                                self.log(f"Found domain: {domain}")
+                                except json.JSONDecodeError:
+                                    continue
+                        
+                            self.log(f"Total domains from Common Crawl so far: {len(self.domains)}")
+                    
+        except Exception as e:
+            self.log(f"Error searching Common Crawl: {e}")
+    
     def search_keyword(self, keyword):
-        """Search domains for a keyword"""
+        """Search domains for a keyword using multiple sources"""
         self.log(f"Processing keyword: {keyword}")
         
-        # Try multiple sources with rate limiting
-        self.search_duckduckgo(keyword)
+        # Start with Google Dorking (most effective technique)
+        self.search_google_dorking(keyword)
         
+        # Try Common Crawl (no rate limiting, but may not have recent data)
+        if len(self.domains) < self.limit:
+            self.search_commoncrawl(keyword)
+        
+        # Try standard Google search if we need more results
+        if len(self.domains) < self.limit:
+            self.search_google(keyword, start=0)
+        
+        # Try Bing web scraping as backup
         if len(self.domains) < self.limit:
             self.search_bing(keyword)
+        
+        # Try DuckDuckGo as backup
+        if len(self.domains) < self.limit:
+            self.search_duckduckgo(keyword)
+        
+        # Try Brave if we need more results
+        if len(self.domains) < self.limit:
+            self.search_brave(keyword)
+        
+        # Try Startpage if still need more
+        if len(self.domains) < self.limit:
+            self.search_startpage(keyword)
+        
+        # If we still have no results, show warning
+        if len(self.domains) == 0:
+            print(f"\n{Colors.RED}[!] No domains found. Possible reasons:{Colors.RESET}")
+            print(f"{Colors.YELLOW}    - Search engines are blocking automated requests{Colors.RESET}")
+            print(f"{Colors.YELLOW}    - Try using higher delay values: --delay-min 5 --delay-max 10{Colors.RESET}")
+            print(f"{Colors.YELLOW}    - Try from a different IP address or network{Colors.RESET}")
+            print(f"{Colors.YELLOW}    - Consider using a VPN or proxy{Colors.RESET}\n")
     
     def process_keywords(self, keywords):
         """Process keyword list"""
