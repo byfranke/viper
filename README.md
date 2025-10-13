@@ -2,6 +2,8 @@
 
 VIPER is a Python-based command-line tool for fast domain discovery, designed for attack surface mapping and threat intelligence gathering. It leverages search engines to find domains related to specific keywords and provides advanced filtering and analysis capabilities.
 
+<img width="671" height="279" alt="Screenshot 2025-10-13 at 15 35 04" src="https://github.com/user-attachments/assets/2d6bf05f-b167-4d11-b354-080e378b0357" />
+
 ## Key Features
 
   * **Keyword-based Domain Discovery**: Searches public sources like DuckDuckGo and Bing to find domains based on one or more keywords.
