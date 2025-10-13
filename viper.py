@@ -644,7 +644,7 @@ def main():
         epilog=f"""
 {Colors.BOLD}Examples:{Colors.RESET}
   {Colors.CYAN}Basic search:{Colors.RESET}
-    %(prog)s logistics "online movies"
+    %(prog)s "online movies"
     %(prog)s --list keywords.txt --limit 100 --output domains.txt
   
   {Colors.CYAN}Directory filtering:{Colors.RESET}
