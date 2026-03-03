@@ -1,4 +1,4 @@
-# VIPER 1.2
+# VIPER 1.3
 
 VIPER is a Python-based command-line tool for fast domain discovery, designed for attack surface mapping and threat intelligence gathering. It leverages search engines to find domains related to specific keywords and provides advanced filtering and analysis capabilities.
 
