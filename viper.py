@@ -2,7 +2,7 @@
 """
 VIPER - Threat Intelligence Tool
 Fast domain discovery for attack surface mapping and threat hunting
-Version: 1.2
+Version: 1.3
 Author: byFranke
 """
 
@@ -26,7 +26,7 @@ import tempfile
 from modules import Colors, Config
 
 # Version
-VERSION = "1.2"
+VERSION = "1.3"
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -343,23 +343,39 @@ class ViperFinder:
             print(f"[*] {message}")
     
     def extract_domain(self, url):
-        """Extract domain from URL"""
+        """Extract domain from URL and return with https:// prefix"""
         try:
+            # Add protocol if missing for proper parsing
+            if not url.startswith(('http://', 'https://')):
+                url = f"https://{url}"
+            
             parsed = urlparse(url)
-            domain = parsed.netloc if parsed.netloc else parsed.path
+            domain = parsed.netloc
+            
+            if not domain:
+                # Try to extract from path if netloc is empty
+                domain = parsed.path.split('/')[0]
+            
+            if not domain:
+                return None
+            
             # Remove www. if present
             domain = re.sub(r'^www\.', '', domain)
+            
+            # Remove port if present
+            domain = domain.split(':')[0]
             
             # Check if domain is in blacklist (from config.json)
             for blocked in self.blacklisted_domains:
                 if blocked in domain.lower():
                     return None
             
-            # Ensure it has protocol
-            if domain and not url.startswith(('http://', 'https://')):
-                return f"https://{domain}"
-            return url if domain else None
-        except:
+            # Validate domain has at least one dot (basic validation)
+            if '.' not in domain:
+                return None
+            
+            return f"https://{domain}"
+        except Exception:
             return None
     
     def _extract_links(self, soup, selector=None):
@@ -406,7 +422,7 @@ class ViperFinder:
                 # Method 1: Look for result divs with links
                 for div in soup.find_all('div', class_='g'):
                     for link in div.find_all('a', href=True):
-                        href = link.get('href', '')
+                        href = str(link.get('href', ''))
                         if href.startswith('http') or href.startswith('/url?q='):
                             links.append(href)
                 
@@ -422,7 +438,7 @@ class ViperFinder:
                 
                 # Method 3: Look for any href starting with /url?q= (Google redirect)
                 for link in soup.find_all('a', href=True):
-                    href = link.get('href', '')
+                    href = str(link.get('href', ''))
                     if '/url?q=' in href:
                         # Extract actual URL from Google redirect
                         match = re.search(r'/url\?q=([^&]+)', href)
@@ -481,7 +497,7 @@ class ViperFinder:
                 # Extract all links from result rows
                 links = []
                 for link in soup.find_all('a', href=True):
-                    href = link.get('href', '')
+                    href = str(link.get('href', ''))
                     # Skip internal DDG links and javascript
                     if href and not href.startswith(('javascript:', '//', '/', 'http://lite.duckduckgo', 'https://lite.duckduckgo')):
                         links.append(href)
@@ -502,6 +518,58 @@ class ViperFinder:
                 
         except Exception as e:
             self.log(f"Error searching DuckDuckGo: {e}")
+    
+    def search_yahoo(self, keyword):
+        """Search domains using Yahoo Search"""
+        self.log(f"Searching on Yahoo: {keyword}")
+        
+        try:
+            headers = self._get_headers()
+            headers.update({
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://search.yahoo.com/',
+            })
+            
+            url = f"https://search.yahoo.com/search?p={quote_plus(keyword)}&n=50"
+            response = self.session.get(url, headers=headers, timeout=15, allow_redirects=True)
+            
+            self._random_delay()
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                links = []
+                
+                # Yahoo result links
+                for link in soup.find_all('a', href=True):
+                    href = str(link.get('href', ''))
+                    # Yahoo uses RU= parameter for redirect URLs
+                    if 'RU=' in href:
+                        match = re.search(r'RU=([^/]+)', href)
+                        if match:
+                            from urllib.parse import unquote
+                            actual_url = unquote(match.group(1))
+                            if actual_url not in links:
+                                links.append(actual_url)
+                    elif href.startswith('http') and 'yahoo.com' not in href and 'yahoo.net' not in href:
+                        if href not in links:
+                            links.append(href)
+                
+                self.log(f"Found {len(links)} potential links from Yahoo")
+                
+                for href in links:
+                    if len(self.domains) >= self.limit:
+                        break
+                    
+                    if not any(blocked in href.lower() for blocked in self.blacklisted_domains):
+                        domain = self.extract_domain(href)
+                        if domain and domain not in self.domains:
+                            self.domains.add(domain)
+                            self.log(f"Found domain: {domain}")
+            else:
+                self.log(f"Yahoo returned status code: {response.status_code}")
+                
+        except Exception as e:
+            self.log(f"Error searching Yahoo: {e}")
     
     def search_google_dorking(self, keyword):
         """Search using Google Dorking techniques for better results"""
@@ -552,7 +620,7 @@ class ViperFinder:
                     
                     # Method 2: Look for /url?q= patterns
                     for link in soup.find_all('a', href=True):
-                        href = link.get('href', '')
+                        href = str(link.get('href', ''))
                         if '/url?q=' in href:
                             match = re.search(r'/url\?q=([^&]+)', href)
                             if match:
@@ -619,13 +687,13 @@ class ViperFinder:
                 # Bing uses <li class="b_algo"> for organic results
                 for li in soup.find_all('li', class_='b_algo'):
                     for link in li.find_all('a', href=True):
-                        href = link.get('href', '')
+                        href = str(link.get('href', ''))
                         if href.startswith('http') and 'bing.com' not in href and href not in links:
                             links.append(href)
                 
                 # Method 3: Look for any external links
                 for link in soup.find_all('a', href=True):
-                    href = link.get('href', '')
+                    href = str(link.get('href', ''))
                     # Check if it's a real result URL (not Bing internal)
                     if (href.startswith('http') and 
                         'bing.com' not in href and 
@@ -659,10 +727,10 @@ class ViperFinder:
         
         try:
             # Rotate headers for each request
-            self.headers = self._get_headers()
+            headers = self._get_headers()
             
             url = f"https://search.brave.com/search?q={quote_plus(keyword)}"
-            response = requests.get(url, headers=self.headers, timeout=15)
+            response = self.session.get(url, headers=headers, timeout=15)
             
             # Random delay after request
             self._random_delay()
@@ -675,7 +743,7 @@ class ViperFinder:
                 
                 # Look for result links
                 for link in soup.find_all('a', href=True):
-                    href = link.get('href', '')
+                    href = str(link.get('href', ''))
                     # Only external links
                     if href.startswith('http') and 'brave.com' not in href:
                         links.append(href)
@@ -702,10 +770,10 @@ class ViperFinder:
         
         try:
             # Rotate headers for each request
-            self.headers = self._get_headers()
+            headers = self._get_headers()
             
             url = f"https://www.startpage.com/sp/search?query={quote_plus(keyword)}"
-            response = requests.get(url, headers=self.headers, timeout=15)
+            response = self.session.get(url, headers=headers, timeout=15)
             
             # Random delay after request
             self._random_delay()
@@ -718,7 +786,7 @@ class ViperFinder:
                 
                 # Startpage uses specific classes for results
                 for link in soup.find_all('a', href=True):
-                    href = link.get('href', '')
+                    href = str(link.get('href', ''))
                     # Filter external links
                     if href.startswith('http') and 'startpage.com' not in href:
                         links.append(href)
@@ -754,10 +822,10 @@ class ViperFinder:
                     # Use the most recent index
                     latest_index = indexes[0]['cdx-api']
                     
-                    # Try multiple search patterns
+                    # Try multiple search patterns (Common Crawl uses wildcard format)
                     search_patterns = [
-                        f"*.{keyword}.*",  # keyword in domain
                         f"*{keyword}*",    # keyword anywhere in URL
+                        f"{keyword}.*",    # keyword as subdomain/prefix
                     ]
                     
                     for pattern in search_patterns:
@@ -800,32 +868,36 @@ class ViperFinder:
         """Search domains for a keyword using multiple sources"""
         self.log(f"Processing keyword: {keyword}")
         
-        # Start with Google Dorking (most effective technique)
-        self.search_google_dorking(keyword)
+        # Try DuckDuckGo first (most reliable for scraping)
+        self.search_duckduckgo(keyword)
         
-        # Try Common Crawl (no rate limiting, but may not have recent data)
-        if len(self.domains) < self.limit:
-            self.search_commoncrawl(keyword)
-        
-        # Try standard Google search if we need more results
-        if len(self.domains) < self.limit:
-            self.search_google(keyword, start=0)
-        
-        # Try Bing web scraping as backup
+        # Try Bing web scraping (usually works well)
         if len(self.domains) < self.limit:
             self.search_bing(keyword)
         
-        # Try DuckDuckGo as backup
+        # Try Yahoo search
         if len(self.domains) < self.limit:
-            self.search_duckduckgo(keyword)
+            self.search_yahoo(keyword)
+        
+        # Try Common Crawl (no rate limiting, historical data)
+        if len(self.domains) < self.limit:
+            self.search_commoncrawl(keyword)
         
         # Try Brave if we need more results
         if len(self.domains) < self.limit:
             self.search_brave(keyword)
         
-        # Try Startpage if still need more
+        # Try Startpage
         if len(self.domains) < self.limit:
             self.search_startpage(keyword)
+        
+        # Try Google Dorking (often gets blocked, try last)
+        if len(self.domains) < self.limit:
+            self.search_google_dorking(keyword)
+        
+        # Try standard Google search
+        if len(self.domains) < self.limit:
+            self.search_google(keyword, start=0)
         
         # If we still have no results, show warning
         if len(self.domains) == 0:
@@ -918,12 +990,12 @@ class ViperFinder:
                 domain_data.update(self.domain_info[domain])
             data['domains'].append(domain_data)
         
-        with open(self.output_file, 'w', encoding='utf-8') as f:
+        with open(str(self.output_file), 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     
     def _save_csv(self, domains):
         """Save results in CSV format"""
-        with open(self.output_file, 'w', newline='', encoding='utf-8') as f:
+        with open(str(self.output_file), 'w', newline='', encoding='utf-8') as f:
             if self.detect_tech or self.filter_dir:
                 fieldnames = ['domain', 'status_code', 'technologies', 'directory', 'timestamp']
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -946,7 +1018,7 @@ class ViperFinder:
     
     def _save_txt(self, domains):
         """Save results in TXT format"""
-        with open(self.output_file, 'w', encoding='utf-8') as f:
+        with open(str(self.output_file), 'w', encoding='utf-8') as f:
             for domain in domains:
                 if self.filter_dir:
                     url = domain.rstrip('/') + (self.filter_dir if self.filter_dir.startswith('/') else '/' + self.filter_dir)
@@ -1018,7 +1090,7 @@ class ViperFinder:
 </body>
 </html>"""
         
-        with open(self.output_file, 'w', encoding='utf-8') as f:
+        with open(str(self.output_file), 'w', encoding='utf-8') as f:
             f.write(html)
     
     def _display_results(self, domains):
@@ -1190,8 +1262,23 @@ def main():
         keywords = args.keywords
     
     if not keywords:
-        print(f"{Colors.RED}[-] No keywords provided{Colors.RESET}", file=sys.stderr)
-        sys.exit(1)
+        print(f"""
+{Colors.RED}{Colors.BOLD}VIPER v{VERSION}{Colors.RESET} - Fast Domain Discovery for Threat Intelligence
+
+{Colors.YELLOW}Usage:{Colors.RESET}
+  {sys.argv[0]} "keyword"                    Search for domains containing keyword
+  {sys.argv[0]} --list keywords.txt          Search from keyword file
+  {sys.argv[0]} "keyword" --dir /admin       Filter domains with specific directory
+  {sys.argv[0]} --help                       Show all options
+
+{Colors.YELLOW}Examples:{Colors.RESET}
+  {sys.argv[0]} "wordpress" --limit 50 -o sites.txt
+  {sys.argv[0]} "e-commerce" --detect-tech --format json
+  {sys.argv[0]} "cms" --dir /wp-admin -v
+
+{Colors.CYAN}byFranke - Threat Intelligence Tools{Colors.RESET}
+""")
+        sys.exit(0)
     
     # Banner
     print(f"""{Colors.RED}{Colors.BOLD}
